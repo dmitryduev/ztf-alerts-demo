@@ -1,13 +1,90 @@
 import argparse
 import pymongo
 import os
+import glob
 import inspect
 import json
 import logging
 import datetime
+import fastavro
 import time
 import shutil
 import traceback
+import requests
+from progress.bar import Bar
+from progress.spinner import Spinner
+import tarfile
+import numpy as np
+import pytz
+from numba import jit
+
+
+def utc_now():
+    return datetime.datetime.now(pytz.utc)
+
+
+def time_stamps():
+    """
+
+    :return: local time, UTC time
+    """
+    return datetime.datetime.now().strftime('%Y%m%d_%H:%M:%S'), \
+           datetime.datetime.utcnow().strftime('%Y%m%d_%H:%M:%S')
+
+
+@jit
+def deg2hms(x):
+    """Transform degrees to *hours:minutes:seconds* strings.
+
+    Parameters
+    ----------
+    x : float
+        The degree value c [0, 360) to be written as a sexagesimal string.
+
+    Returns
+    -------
+    out : str
+        The input angle written as a sexagesimal string, in the
+        form, hours:minutes:seconds.
+
+    """
+    assert 0.0 <= x < 360.0, 'Bad RA value in degrees'
+    # ac = Angle(x, unit='degree')
+    # hms = str(ac.to_string(unit='hour', sep=':', pad=True))
+    # print(str(hms))
+    _h = np.floor(x * 12.0 / 180.)
+    _m = np.floor((x * 12.0 / 180. - _h) * 60.0)
+    _s = ((x * 12.0 / 180. - _h) * 60.0 - _m) * 60.0
+    hms = '{:02.0f}:{:02.0f}:{:07.4f}'.format(_h, _m, _s)
+    # print(hms)
+    return hms
+
+
+@jit
+def deg2dms(x):
+    """Transform degrees to *degrees:arcminutes:arcseconds* strings.
+
+    Parameters
+    ----------
+    x : float
+        The degree value c [-90, 90] to be converted.
+
+    Returns
+    -------
+    out : str
+        The input angle as a string, written as degrees:minutes:seconds.
+
+    """
+    assert -90.0 <= x <= 90.0, 'Bad Dec value in degrees'
+    # ac = Angle(x, unit='degree')
+    # dms = str(ac.to_string(unit='degree', sep=':', pad=True))
+    # print(dms)
+    _d = np.floor(abs(x)) * np.sign(x)
+    _m = np.floor(np.abs(x - _d) * 60.0)
+    _s = np.abs(np.abs(x - _d) * 60.0 - _m) * 60.0
+    dms = '{:02.0f}:{:02.0f}:{:06.3f}'.format(_d, _m, _s)
+    # print(dms)
+    return dms
 
 
 class Fetcher(object):
@@ -241,6 +318,73 @@ class Fetcher(object):
 
         return True
 
+    def insert_db_entry(self, _collection=None, _db_entry=None):
+        """
+            Insert a document _doc to collection _collection in DB.
+            It is monitored for timeout in case DB connection hangs for some reason
+        :param _collection:
+        :param _db_entry:
+        :return:
+        """
+        assert _collection is not None, 'Must specify collection'
+        assert _db_entry is not None, 'Must specify document'
+        try:
+            self.db['db'][_collection].insert_one(_db_entry)
+        except Exception as _e:
+            print(*time_stamps(), 'Error inserting {:s} into {:s}'.format(str(_db_entry['_id']), _collection))
+            traceback.print_exc()
+            print(_e)
+
+    def insert_multiple_db_entries(self, _collection=None, _db_entries=None):
+        """
+            Insert a document _doc to collection _collection in DB.
+            It is monitored for timeout in case DB connection hangs for some reason
+        :param _db:
+        :param _collection:
+        :param _db_entries:
+        :return:
+        """
+        assert _collection is not None, 'Must specify collection'
+        assert _db_entries is not None, 'Must specify documents'
+        try:
+            # ordered=False ensures that every insert operation will be attempted
+            # so that if, e.g., a document already exists, it will be simply skipped
+            self.db['db'][_collection].insert_many(_db_entries, ordered=False)
+        except pymongo.errors.BulkWriteError as bwe:
+            print(*time_stamps(), bwe.details)
+        except Exception as _e:
+            traceback.print_exc()
+            print(_e)
+
+    @staticmethod
+    def alert_mongify(alert):
+
+        doc = dict(alert)
+
+        # candid+objectId should be a unique combination:
+        doc['_id'] = f"{alert['candid']}_{alert['objectId']}"
+
+        # GeoJSON for 2D indexing
+        doc['coordinates'] = {}
+        doc['coordinates']['epoch'] = doc['candidate']['jd']
+        _ra = doc['candidate']['ra']
+        _dec = doc['candidate']['dec']
+        _radec = [_ra, _dec]
+        # string format: H:M:S, D:M:S
+        # tic = time.time()
+        _radec_str = [deg2hms(_ra), deg2dms(_dec)]
+        # print(time.time() - tic)
+        # print(_radec_str)
+        doc['coordinates']['radec_str'] = _radec_str
+        # for GeoJSON, must be lon:[-180, 180], lat:[-90, 90] (i.e. in deg)
+        _radec_geojson = [_ra - 180.0, _dec]
+        doc['coordinates']['radec_geojson'] = {'type': 'Point',
+                                               'coordinates': _radec_geojson}
+        # radians:
+        doc['coordinates']['radec'] = [_ra * np.pi / 180.0, _dec * np.pi / 180.0]
+
+        return doc
+
     def fetch(self, **kwargs):
         """
 
@@ -248,9 +392,26 @@ class Fetcher(object):
         raise NotImplementedError
 
 
+class FetcherKafka(Fetcher):
+    """
+        Fetch ZTF alerts from Kafka
+    """
+    def __init__(self, _config_file):
+        """
+
+        :param _config_file:
+        """
+
+        ''' initialize super class '''
+        super(FetcherKafka, self).__init__(_config_file=_config_file)
+
+    def fetch(self, **kwargs):
+        pass
+
+
 class FetcherArchive(Fetcher):
     """
-
+        Fetch ZTF alerts from the archive
     """
     def __init__(self, _config_file):
         """
@@ -261,12 +422,20 @@ class FetcherArchive(Fetcher):
         ''' initialize super class '''
         super(FetcherArchive, self).__init__(_config_file=_config_file)
 
-    def fetch(self, _obs_date=None):
+        ''' db stuff '''
+        # number of records to insert to db
+        self.batch_size = int(self.config['misc']['batch_size'])
+        self.documents = []
+
+    def fetch(self, _obs_date=None, _demo=False):
         """
 
         :param _obs_date:
+        :param _demo:
         :return:
         """
+        assert _obs_date is not None, 'must specify obs date'
+
         try:
             # check if a new log file needs to be started
             self.check_logging()
@@ -277,7 +446,95 @@ class FetcherArchive(Fetcher):
             connected = self.check_db_connection()
 
             if connected:
-                pass
+                # fetch
+                if not _demo:
+                    url = os.path.join(self.config['misc']['ztf_public_archive'], f'ztf_public_{_obs_date}.tar.gz')
+                else:
+                    # fetch demo from skipper
+                    _obs_date = self.config['misc']['demo']['date']
+                    url = self.config['misc']['demo']['url']
+
+                file_name = os.path.join(self.config['path']['path_alerts'], f'{_obs_date}.tar.gz')
+
+                if not os.path.exists(file_name):
+                    print(f'Fetching {url}')
+
+                    r = requests.get(url, stream=True)
+
+                    size = r.headers['content-length']
+                    if size:
+                        p = Bar(_obs_date, max=int(size))
+                    else:
+                        p = Spinner(_obs_date)
+
+                    with open(file_name, 'wb') as _f:
+                        for chunk in r.iter_content(chunk_size=1024 * 50):
+                            if chunk:  # filter out keep-alive new chunks
+                                p.next(len(chunk))
+                                _f.write(chunk)
+
+                    p.finish()
+
+                    # unzip:
+                    print(f'Unzipping {file_name}')
+                    with tarfile.open(file_name) as tf:
+                        path_date = os.path.join(self.config['path']['path_alerts'], f'{_obs_date}')
+                        if not os.path.exists(path_date):
+                            os.makedirs(path_date)
+                        tf.extractall(path=path_date)
+
+                    # ingest into db:
+                    print(f'Ingesting {_obs_date} into db')
+                    alerts_date = glob.glob(os.path.join(self.config['path']['path_alerts'],
+                                                         f'{_obs_date}', '*.avro'))
+                    for fa in alerts_date:
+                        try:
+                            with open(fa, 'rb') as f_avro:
+                                reader = fastavro.reader(f_avro)
+                                for record in reader:
+                                    alert = self.alert_mongify(record)
+                                    # print('ingesting {:s} into db'.format(alert['_id']))
+                                    # self.insert_db_entry(_collection=self.config['database']['collection_alerts'],
+                                    #                      _db_entry=alert)
+                                    self.documents.append(alert)
+
+                            # insert batch, then flush
+                            if len(self.documents) == self.batch_size:
+                                print(f'inserting batch')
+                                self.logger.info(f'inserting batch')
+                                self.insert_multiple_db_entries(_collection=
+                                                                self.config['database']['collection_alerts'],
+                                                                _db_entries=self.documents)
+                                # flush:
+                                self.documents = []
+                        except Exception as _e:
+                            print(_e)
+                            traceback.print_exc()
+                            continue
+
+                    # stuff left in the last batch?
+                    if len(self.documents) > 0:
+                        print(f'inserting last batch')
+                        self.logger.info(f'inserting last batch')
+                        self.insert_multiple_db_entries(_collection=self.config['database']['collection_alerts'],
+                                                        _db_entries=self.documents)
+                        self.documents = []
+
+                    # creating alert id index:
+                    print('Creating 1d indices')
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('objectId', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candid', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candidate.rb', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candidate.fwhm', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candidate.field', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candidate.magpsf', 1)])
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('candidate.jd', 1)])
+
+                    # create 2d index:
+                    print('Creating 2d index')
+                    self.db['db'][self.config['database']['collection_alerts']].create_index([('coordinates.radec_geojson',
+                                                                                               '2dsphere')])
+                    print('All done')
 
         except KeyboardInterrupt:
             # user ctrl-c'ed
@@ -317,10 +574,12 @@ if __name__ == '__main__':
                                      'Fetch AVRO packets from Archive/Kafka streams and ingest them into DB')
     parser.add_argument('config_file', help='path to config file')
     parser.add_argument('obsdate', help='observing date string: YYYYMMDD')
+    parser.add_argument('--demo', action='store_true', help='fetch demo alerts?')
 
     args = parser.parse_args()
     obs_date = args.obsdate
     config_file = args.config_file
+    demo = args.demo
 
     f = FetcherArchive(config_file)
-    f.fetch(obs_date)
+    f.fetch(obs_date, demo)

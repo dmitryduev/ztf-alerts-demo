@@ -33,7 +33,13 @@
   },
 
   "misc": {
-    "logging_level": "debug"
+    "logging_level": "debug",
+    "ztf_public_archive": "https://ztf.uw.edu/alerts/public/",
+    "batch_size": 200,
+    "demo": {
+      "date": "20180713",
+      "url": "https://"
+    }
   },
 
   "kafka": {

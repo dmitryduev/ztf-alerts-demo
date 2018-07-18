@@ -22,7 +22,7 @@ docker volume create alert-fetcher-mongo-volume
 
 Launch the MongoDB container. Feel free to change u/p for the admin
 ```bash
-docker run -d --restart always --name alert-fetcher-mongo -p 27019:27017 -v alert-fetcher-mongo-volume:/data/db \
+docker run -d --restart always --name alert-fetcher-mongo -p 27018:27017 -v alert-fetcher-mongo-volume:/data/db \
        -e MONGO_INITDB_ROOT_USERNAME=mongoadmin -e MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret \
        mongo:latest
 ```
@@ -32,6 +32,6 @@ Build and launch the alert-fetcher container. Bind-mount a directory on the host
 cd alert-fetcher
 docker build -t alert-fetcher -f Dockerfile .
 docker run -v /path/to/store/alerts:/alerts \
-           --name alert-fetcher -d --link alert-fetcher-mongo:mongo --restart always -it alert-fetcher
+           --name alert-fetcher -d --link alert-fetcher-mongo:mongo -it alert-fetcher
 ```
 

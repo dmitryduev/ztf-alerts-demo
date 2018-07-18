@@ -19,5 +19,7 @@ ADD code/ /app/
 # change working directory to /app
 WORKDIR /app
 
-# run
-CMD /bin/bash
+# run bash / type commands manually
+#CMD /bin/bash
+# fetch alert demo set and ingest it into db
+CMD python fetcher.py config.json 20180713 --demo

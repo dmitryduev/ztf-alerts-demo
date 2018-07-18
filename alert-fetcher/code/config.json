@@ -38,7 +38,7 @@
     "batch_size": 200,
     "demo": {
       "date": "20180713",
-      "url": "https://github.com/dmitryduev/ztf-alerts-demo/blob/master/data/ztf_public_20180713_small.zip?raw=true"
+      "url": "https://github.com/dmitryduev/ztf-alerts-demo/blob/master/data/ztf_public_20180713_small.tar.gz?raw=true"
     }
   },
 
